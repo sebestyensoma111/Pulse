@@ -43,6 +43,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 | **CPU** | Processzortípus, logikai magonkénti terhelés és rendezhető folyamatlista. A listában név vagy PID alapján kereshetsz. A folyamat CPU-használata a teljes CPU-kapacitás százalékában látszik. |
 | **Memory** | RAM- és swaphasználat, a folyamatok memóriája (RSS), valamint a kiolvasható RAM-modulok típusa, DDR-generációja, kapacitása és sebessége. |
 | **Storage** | Olvasási és írási sebesség, meghajtótípusok, kapacitás GB-ban vagy TB-ban és a csatolt kötetek foglaltsága. |
+| **SMART** | Meghajtónkénti állapot, hőfok, üzemóra és a kiolvasható élettartam-számlálók. |
 | **Network** | Le- és feltöltési sebesség, valamint az összes küldött és fogadott adat hálózati interfészenként. |
 | **Hardware** | Felismert eszközök, például a GPU, az alaplap, a BIOS és a hálózati adapterek. A **Temperatures** fülön a hőfok mellett az eszköz és a szenzor neve is látszik. |
 | **Clocks** | CPU- és GPU-órajelek MHz-ben. A RAM sebessége MT/s-ban jelenik meg, a firmware által közölt beállított vagy névleges érték alapján. |
@@ -59,7 +60,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 
 ## Mikor jelennek meg az adatok?
 
-- A **Storage → SMART** nézetben választhatsz fizikai meghajtót. Linuxon a `smartmontools` csomag és az eszköz olvasásához szükséges jogosultság kell. Windowson a tárolóillesztő által közölt állapot és megbízhatósági számlálók jelennek meg. A kiolvasható mezők a meghajtótól és az adaptertől függenek.
+- A **Storage → SMART** nézetben válassz fizikai meghajtót. A **Refresh** gombbal újra lekérheted az adatokat. Linuxon látható az SSD kopása, a teljes olvasott és írt adatmennyiség, valamint a HDD felpörgés–leállás és fejparkolási ciklusainak száma, ha a meghajtó közli ezeket. A kiolvasáshoz a `smartmontools` csomag és eszközolvasási jogosultság kell. Ha ez hiányzik, a Pulse a kernelből elérhető meghajtóadatokat mutatja. Windowson az állapot és az elérhető megbízhatósági számlálók a rendszer tárolószolgáltatójától érkeznek.
 - A lemez- és hálózati sebességhez két mérés kell. A kötőjel vagy az **Unavailable** azt jelzi, hogy az app nem kapott adatot.
 - Linuxon a meghajtóadatokat az `lsblk`, a RAM-modulok adatait a `dmidecode` adja. A rendszer korlátozhatja a moduladatok olvasását. A CAS-késleltetés (CL) nem érhető el.
 - Linuxon a CPU órajele logikai magonként jelenik meg, ha kiolvasható. Windowson az érték névleges is lehet. A GPU adatai az illesztőprogramtól függenek, az NVIDIA-adatokhoz az `nvidia-smi` kell.

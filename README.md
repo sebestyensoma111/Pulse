@@ -43,6 +43,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 | **CPU** | Processor model, load per logical CPU, and a process list you can sort or filter by name or PID. Process CPU usage is shown as a share of total CPU capacity. |
 | **Memory** | RAM and swap usage, process memory (RSS), and available module details including model, DDR type, capacity, and transfer rate. |
 | **Storage** | Read and write speeds, drive models and capacities in GB or TB, and space usage on mounted volumes. |
+| **SMART** | Per-drive health, temperature, power-on hours, and available lifetime counters. |
 | **Network** | Download and upload speeds, plus the total bytes sent and received per interface. |
 | **Hardware** | Detected devices such as the GPU, motherboard, BIOS, and network adapters. The **Temperatures** tab labels readings by device and sensor. |
 | **Clocks** | CPU and GPU frequencies in MHz. RAM transfer rates in MT/s come from firmware and may be configured or rated values. |
@@ -59,7 +60,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 
 ## Reading availability
 
-- Open **Storage → SMART** to select a physical drive and read its diagnostics. On Linux, install `smartmontools` and ensure `smartctl` can read the device. On Windows, Pulse shows the health and reliability counters exposed by the storage provider. The available fields depend on the drive and adapter.
+- Open **Storage → SMART**, select a physical drive, and click **Refresh** to read it again. On Linux, available counters include SSD wear, lifetime reads and writes, and HDD start/stop and load/unload cycles. Install `smartmontools` and ensure `smartctl` can read the device. If it cannot, Pulse still shows the drive details it can read from the kernel. On Windows, the available health and reliability counters come from the storage provider.
 - Disk and network rates need two samples. A dash or **Unavailable** means the app has no reading for that field.
 - On Linux, Pulse uses `lsblk` for drive details and `dmidecode` for RAM modules. The system may restrict access to module details. CAS latency (CL) is unavailable.
 - Linux CPU frequencies are shown per logical CPU where available. Windows may report a nominal CPU frequency. GPU readings depend on the driver, and NVIDIA readings require `nvidia-smi`.
