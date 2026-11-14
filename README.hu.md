@@ -5,6 +5,8 @@ Magyar · [English](README.md)
 
 A Pulse egy asztali rendszerfigyelő Windowsra és Linuxra. A főképernyő mutatja a CPU és a RAM használatát, a lemezműveleteket és a hálózati forgalmat. A grafikonokon az utolsó egy perc látszik.
 
+![A Pulse főképernyője](assets/screenshots/dashboard.png)
+
 ## Indítás forrásból
 
 Python 3.12 vagy újabb kell hozzá. A parancsokat a projekt mappájában futtasd.

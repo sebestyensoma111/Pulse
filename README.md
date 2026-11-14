@@ -5,6 +5,8 @@
 
 Pulse is a desktop system monitor for Windows and Linux. The dashboard shows CPU and RAM usage, disk activity, and network traffic, with charts covering the last minute.
 
+![Pulse dashboard](assets/screenshots/dashboard.png)
+
 ## Run from source
 
 Use Python 3.12 or newer. Run these commands from the project folder.

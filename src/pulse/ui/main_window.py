@@ -19,13 +19,29 @@ HARDWARE_PAGE = len(METRICS) + 1
 
 STYLE = """
 QWidget { background: #10151d; color: #e6edf5; font-size: 14px; }
+QWidget#shell { background: #0b1018; }
+QWidget#workspace { background: #10151d; border: 1px solid #35475c; border-radius: 15px; }
+QStackedWidget#pages, QWidget#page { background: transparent; }
+QLabel#brand { background: transparent; font-size: 22px; font-weight: 700; }
+QLabel#brandMark { background: #203d38; color: #a7f3d7; border: 1px solid #46776a;
+    border-radius: 8px; font-size: 22px; font-weight: 700; }
+QLabel#location { background: transparent; color: #bbc8d8; }
+QWidget#titleBar { background: transparent; }
+QToolButton[windowControl="true"] { background: transparent; color: #e6edf5;
+    border: 1px solid transparent; border-radius: 6px; font-size: 17px; }
+QToolButton[windowControl="true"]:hover { background: #29384a; }
+QToolButton[windowControl="true"]:focus { border-color: #70e0bd; }
+QToolButton#closeWindow:hover { background: #a62e43; color: #ffffff; }
+QWidget#clockPanel { background: #172331; border: 1px solid #35475c; border-radius: 10px; }
+QLabel#clockSummary { background: transparent; color: #d0dfed; }
+QStatusBar, QStatusBar QLabel { background: #0b1018; color: #a6b2c1; }
 QLabel#title { font-size: 30px; font-weight: 700; }
 QLabel#muted { color: #a6b2c1; }
 QLabel#reading { font-size: 23px; font-weight: 600; }
 QPushButton, QLineEdit { background: #222f40; border: 1px solid #394b61;
     border-radius: 6px; padding: 8px 12px; }
 QPushButton:hover, QPushButton:focus, QLineEdit:focus { border-color: #70e0bd; }
-QPushButton#card { background: #1a2330; border-radius: 10px; }
+QPushButton#card { background: #1a2330; border-radius: 12px; }
 QPushButton#card:hover, QPushButton#card:focus { background: #202d3d; }
 QPushButton#card QLabel { background: transparent; }
 QLabel#metric { font-weight: 600; }
@@ -241,9 +257,86 @@ class DataTable(QtWidgets.QTableView):
         self.model().update_rows(rows)
 
 
+class TitleBar(QtWidgets.QWidget):
+    def __init__(self, window: QtWidgets.QMainWindow) -> None:
+        super().__init__(window)
+        self.setObjectName("titleBar")
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        mark = label("∿", "brandMark")
+        mark.setFixedSize(34, 34)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.location = label("Overview", "location")
+        for text in (mark, label("Pulse", "brand")):
+            text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            layout.addWidget(text)
+        layout.addStretch()
+        self.location.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(self.location)
+
+        minimize = self.control("−", "Minimize")
+        minimize.clicked.connect(window.showMinimized)
+        self.maximize = self.control("□", "Maximize")
+        self.maximize.clicked.connect(self.toggle_maximized)
+        close = self.control("×", "Close")
+        close.setObjectName("closeWindow")
+        close.clicked.connect(window.close)
+        for button in (minimize, self.maximize, close):
+            layout.addWidget(button)
+
+    def control(self, text: str, name: str) -> QtWidgets.QToolButton:
+        button = QtWidgets.QToolButton(self)
+        button.setProperty("windowControl", True)
+        button.setText(text)
+        button.setToolTip(name)
+        button.setAccessibleName(name)
+        button.setFixedSize(34, 34)
+        button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        return button
+
+    def toggle_maximized(self) -> None:
+        window = self.window()
+        if window.isMaximized():
+            window.showNormal()
+        else:
+            window.showMaximized()
+
+    def mousePressEvent(self, event) -> None:
+        handle = self.window().windowHandle()
+        if event.button() == Qt.MouseButton.LeftButton and handle and handle.startSystemMove():
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class ResizeHandle(QtWidgets.QWidget):
+    def __init__(self, window: QtWidgets.QWidget, edges, cursor) -> None:
+        super().__init__(window)
+        self.edges = edges
+        self.setCursor(cursor)
+        self.setStyleSheet("background: transparent")
+
+    def mousePressEvent(self, event) -> None:
+        handle = self.window().windowHandle()
+        if event.button() == Qt.MouseButton.LeftButton and handle and handle.startSystemResize(self.edges):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.resize_handles: list[ResizeHandle] = []
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle("Pulse System Monitor")
         self.resize(980, 670)
         self.setMinimumSize(600, 500)
@@ -253,8 +346,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.latest_clocks: tuple[Clock, ...] | None = None
         self.animation: QtCore.QPropertyAnimation | None = None
         self.closing = False
+        shell = QtWidgets.QWidget()
+        shell.setObjectName("shell")
+        self.setCentralWidget(shell)
+        shell_layout = QtWidgets.QVBoxLayout(shell)
+        shell_layout.setContentsMargins(14, 10, 14, 4)
+        shell_layout.setSpacing(10)
+
+        self.title_bar = TitleBar(self)
+        shell_layout.addWidget(self.title_bar)
+
+        workspace = QtWidgets.QWidget()
+        workspace.setObjectName("workspace")
+        frame_layout = QtWidgets.QVBoxLayout(workspace)
+        frame_layout.setContentsMargins(1, 1, 1, 1)
         self.stack = QtWidgets.QStackedWidget()
-        self.setCentralWidget(self.stack)
+        self.stack.setObjectName("pages")
+        frame_layout.addWidget(self.stack)
+        shell_layout.addWidget(workspace, 1)
         self.readings: list[QtWidgets.QLabel] = []
         self.notes: list[QtWidgets.QLabel] = []
         self.charts: list[Sparkline] = []
@@ -268,7 +377,26 @@ class MainWindow(QtWidgets.QMainWindow):
         for index in range(len(METRICS)):
             self.build_detail(index)
         self.build_hardware_page()
+        self.statusBar().setSizeGripEnabled(False)
         self.statusBar().showMessage("Sampling system metrics…")
+        edge = Qt.Edge
+        cursor = Qt.CursorShape
+        self.resize_handles = [
+            ResizeHandle(self, edges, shape)
+            for edges, shape in (
+                (edge.TopEdge, cursor.SizeVerCursor),
+                (edge.BottomEdge, cursor.SizeVerCursor),
+                (edge.LeftEdge, cursor.SizeHorCursor),
+                (edge.RightEdge, cursor.SizeHorCursor),
+                (edge.TopEdge | edge.LeftEdge, cursor.SizeFDiagCursor),
+                (edge.TopEdge | edge.RightEdge, cursor.SizeBDiagCursor),
+                (edge.BottomEdge | edge.LeftEdge, cursor.SizeBDiagCursor),
+                (edge.BottomEdge | edge.RightEdge, cursor.SizeFDiagCursor),
+            )
+        ]
+        for handle in self.resize_handles:
+            handle.raise_()
+        self.update_window_frame()
         self.sampler = Sampler(self)
         self.sampler.sampled.connect(self.update_snapshot)
         self.hardware_sampler = HardwareSampler(self)
@@ -280,26 +408,61 @@ class MainWindow(QtWidgets.QMainWindow):
             worker.finished.connect(self.finish_close, Qt.ConnectionType.QueuedConnection)
             worker.start()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_window_frame()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            self.update_window_frame()
+
+    def update_window_frame(self) -> None:
+        if not self.resize_handles:
+            return
+        maximized = self.isMaximized()
+        button = self.title_bar.maximize
+        name = "Restore" if maximized else "Maximize"
+        button.setText("❐" if maximized else "□")
+        button.setToolTip(name)
+        button.setAccessibleName(name)
+        width, height, edge = self.width(), self.height(), 6
+        for handle, rect in zip(self.resize_handles, (
+            (edge, 0, width - 2 * edge, edge),
+            (edge, height - edge, width - 2 * edge, edge),
+            (0, edge, edge, height - 2 * edge),
+            (width - edge, edge, edge, height - 2 * edge),
+            (0, 0, edge, edge),
+            (width - edge, 0, edge, edge),
+            (0, height - edge, edge, edge),
+            (width - edge, height - edge, edge, edge),
+        )):
+            handle.setGeometry(*rect)
+            handle.setVisible(not maximized and not self.isFullScreen())
+
     def build_dashboard(self) -> None:
         page = QtWidgets.QWidget()
+        page.setObjectName("page")
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(24, 18, 24, 18)
         layout.setSpacing(14)
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(label("Pulse", "title"), 1)
+        top.addWidget(label("System overview", "title"), 1)
         hardware = QtWidgets.QPushButton("Hardware →")
         hardware.clicked.connect(lambda: self.navigate(HARDWARE_PAGE))
         top.addWidget(hardware)
         layout.addLayout(top)
-        layout.addWidget(label("System overview", "muted"))
-        clock_bar = QtWidgets.QHBoxLayout()
-        self.clock_summary = label("Reading CPU and GPU clocks…", "muted")
+        clock_panel = QtWidgets.QWidget()
+        clock_panel.setObjectName("clockPanel")
+        clock_bar = QtWidgets.QHBoxLayout(clock_panel)
+        clock_bar.setContentsMargins(12, 6, 6, 6)
+        self.clock_summary = label("Reading CPU and GPU clocks…", "clockSummary")
         self.clock_summary.setWordWrap(True)
         clock_bar.addWidget(self.clock_summary, 1)
         clocks = QtWidgets.QPushButton("Clocks →")
         clocks.clicked.connect(self.open_clocks)
         clock_bar.addWidget(clocks)
-        layout.addLayout(clock_bar)
+        layout.addWidget(clock_panel)
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(14)
         for index, metric in enumerate(METRICS):
@@ -311,8 +474,9 @@ class MainWindow(QtWidgets.QMainWindow):
             card.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
             card.clicked.connect(lambda checked=False, i=index: self.navigate(i + 1))
             content = QtWidgets.QVBoxLayout(card)
-            content.setContentsMargins(16, 12, 16, 12)
+            content.setContentsMargins(18, 14, 18, 14)
             title = label(f"{metric}  →", "metric")
+            title.setStyleSheet(f"color: {COLORS[index]}")
             reading = label("—", "reading")
             note = label("Waiting for first sample", "muted")
             note.setWordWrap(True)
@@ -329,6 +493,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def build_detail(self, index: int) -> None:
         page = QtWidgets.QWidget()
+        page.setObjectName("page")
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(24, 18, 24, 18)
         back = QtWidgets.QPushButton("← Overview")
@@ -388,6 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def build_hardware_page(self) -> None:
         page = QtWidgets.QWidget()
+        page.setObjectName("page")
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(24, 18, 24, 18)
         back = QtWidgets.QPushButton("← Overview")
@@ -431,6 +597,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.animation = None
             old_page.setGraphicsEffect(None)
         self.stack.setCurrentIndex(page)
+        self.title_bar.location.setText(("Overview", *METRICS, "Hardware")[page])
         self.sampler.page = page
         self.update_sensor_view()
         if 0 < page < HARDWARE_PAGE:
