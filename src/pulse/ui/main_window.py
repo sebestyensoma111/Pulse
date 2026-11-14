@@ -1,4 +1,4 @@
-# made by Péter Noé
+# Készítette Péter Noé
 
 from collections import deque
 from dataclasses import replace
@@ -219,6 +219,7 @@ class Sparkline(QtWidgets.QWidget):
         if self.isVisible():
             self.update()
 
+    # grafikon kirajzolasa
     def paintEvent(self, event) -> None:
         if not self.points:
             return
@@ -498,6 +499,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().hideEvent(event)
         self.sync_sampling_view()
 
+    # mintavetel nezet szerint
     def sync_sampling_view(self) -> None:
         visible = self.isVisible() and not self.isMinimized()
         page = self.stack.currentIndex()

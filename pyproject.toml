@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# made by Péter Noé
+# Készítette Péter Noé
 name = "pulse-system-monitor"
 version = "0.1.0"
 description = "A desktop system monitor for Windows and Linux"

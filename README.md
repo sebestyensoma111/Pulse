@@ -1,5 +1,5 @@
 # Pulse
-<!-- made by Péter Noé -->
+<!-- Készítette Péter Noé -->
 
 [Magyar](README.hu.md) · English
 

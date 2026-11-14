@@ -1,4 +1,4 @@
-# made by Péter Noé
+# Készítette Péter Noé
 
 import time
 from collections.abc import Callable
@@ -58,6 +58,7 @@ class Snapshot:
     uptime_seconds: int | None = None
 
 
+# sebesseg a szamlalokbol
 class Rates:
     def __init__(self) -> None:
         self.previous: dict[str, tuple[int, int]] = {}
@@ -90,6 +91,7 @@ def read[T](label: str, collect: Callable[[], T]) -> T | None:
         return None
 
 
+# rendszeradatok lekerese
 class Monitor:
     def __init__(self) -> None:
         self.disk_rates = Rates()

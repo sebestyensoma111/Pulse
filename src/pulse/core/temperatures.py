@@ -39,12 +39,13 @@ class ThermalChannel:
     zone: Path | None = None
 
 
+# szenzorok keresese
 def thermal_channels(hardware: Hardware, root: Path) -> tuple[ThermalChannel, ...]:
     pci_models = {d.identifier: d.model or d.identifier for d in hardware.devices if d.identifier}
     drives = {}
     for drive in hardware.drives:
         path = sys_path(root / "class/block" / drive.name)
-        # Közös NVMe vezérlő
+        # kozos nvme vezerlo
         for node in reversed(path.parents):
             if re.fullmatch(r"nvme\d+", node.name):
                 drives.setdefault(node, set()).add(drive.model or drive.name)
@@ -177,6 +178,7 @@ def windows_disk_temperatures() -> tuple[Temperature, ...]:
     )
 
 
+# hofok es orajel
 def read_sensors(hardware: Hardware, thermals: LinuxThermals | None = None) -> tuple[tuple[Temperature, ...], tuple[Clock, ...], tuple[Gpu, ...]]:
     temperatures, clocks, gpus = nvidia_readings()
     if sys.platform == "linux":

@@ -234,6 +234,7 @@ def windows_smart(drive: Drive) -> SmartReport:
     return SmartReport(f"Windows drive health · {health}", tuple(rows), note)
 
 
+# smart adatok lekerese
 def read_smart(drive: Drive) -> SmartReport:
     if sys.platform == "linux":
         return linux_smart(drive)
