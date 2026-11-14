@@ -1,4 +1,5 @@
 # Pulse
+<!-- made by Péter Noé -->
 
 Magyar · [English](README.md)
 

@@ -1,8 +1,11 @@
+# made by Péter Noé
+
 from collections import deque
 from sys import platform
 from threading import Event
 from time import monotonic
 
+from pulse.core.clocks import Clock
 from pulse.core.hardware import Hardware, read_hardware
 from pulse.core.monitor import Monitor, Snapshot
 from pulse.core.temperatures import read_sensors
@@ -98,14 +101,32 @@ class HardwareSampler(QtCore.QThread):
     def __init__(self, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
         self.stopped = Event()
+        self.temperature_view = Event()
+        self.refresh = Event()
+
+    def set_temperature_view(self, visible: bool) -> None:
+        if visible and not self.temperature_view.is_set():
+            self.temperature_view.set()
+            self.refresh.set()
+        elif not visible:
+            self.temperature_view.clear()
+
+    def stop(self) -> None:
+        self.stopped.set()
+        self.refresh.set()
 
     def run(self) -> None:
         hardware = read_hardware()
         self.hardware_ready.emit(hardware)
         interval = 10 if platform == "win32" else 2
-        while not self.stopped.is_set():
-            self.sensors_ready.emit(read_sensors(hardware))
-            self.stopped.wait(interval)
+        while True:
+            self.refresh.clear()
+            if self.stopped.is_set():
+                break
+            include_temperatures = self.temperature_view.is_set()
+            temperatures, clocks = read_sensors(hardware, include_temperatures=include_temperatures)
+            self.sensors_ready.emit((temperatures if include_temperatures else None, clocks))
+            self.refresh.wait(interval)
 
 
 class Sparkline(QtWidgets.QWidget):
@@ -229,6 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setStyleSheet(STYLE)
         self.snapshot: Snapshot | None = None
         self.hardware = Hardware()
+        self.latest_clocks: tuple[Clock, ...] | None = None
         self.animation: QtCore.QPropertyAnimation | None = None
         self.closing = False
         self.stack = QtWidgets.QStackedWidget()
@@ -252,6 +274,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hardware_sampler = HardwareSampler(self)
         self.hardware_sampler.hardware_ready.connect(self.update_hardware)
         self.hardware_sampler.sensors_ready.connect(self.update_sensors)
+        self.hardware_tabs.currentChanged.connect(self.update_sensor_view)
         self.workers = (self.sampler, self.hardware_sampler)
         for worker in self.workers:
             worker.finished.connect(self.finish_close, Qt.ConnectionType.QueuedConnection)
@@ -409,6 +432,7 @@ class MainWindow(QtWidgets.QMainWindow):
             old_page.setGraphicsEffect(None)
         self.stack.setCurrentIndex(page)
         self.sampler.page = page
+        self.update_sensor_view()
         if 0 < page < HARDWARE_PAGE:
             self.update_detail(page - 1)
         current = self.stack.currentWidget()
@@ -475,6 +499,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @Slot(object)
     def update_sensors(self, readings) -> None:
         temperatures, clocks = readings
+        self.latest_clocks = clocks
         cpu = [reading for reading in clocks if reading.category == "CPU"]
         graphics = [reading.mhz for reading in clocks
                     if reading.category == "GPU" and reading.channel.startswith("Graphics")]
@@ -486,11 +511,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 cpu_text += " (OS reported)"
         gpu_text = f"{max(graphics):.0f} MHz" if graphics else "unavailable"
         self.clock_summary.setText(f"CPU · {cpu_text}     GPU · {gpu_text}")
-        self.temperature_table.update_rows(
-            ((reading.device, reading.device.casefold()), (reading.sensor, reading.sensor.casefold()),
-             (f"{reading.celsius:.1f} °C", reading.celsius), (reading.source, reading.source))
-            for reading in temperatures
-        )
+        if temperatures is not None and self.sensor_view_is_open(self.temperature_table):
+            self.temperature_table.update_rows(
+                ((reading.device, reading.device.casefold()), (reading.sensor, reading.sensor.casefold()),
+                 (f"{reading.celsius:.1f} °C", reading.celsius), (reading.source, reading.source))
+                for reading in temperatures
+            )
+        if self.sensor_view_is_open(self.clock_table):
+            self.update_clock_table(clocks)
+
+    def sensor_view_is_open(self, table: DataTable) -> bool:
+        return (self.stack.currentIndex() == HARDWARE_PAGE
+                and self.hardware_tabs.currentWidget() is table.parentWidget())
+
+    def update_sensor_view(self) -> None:
+        self.hardware_sampler.set_temperature_view(self.sensor_view_is_open(self.temperature_table))
+        if self.latest_clocks is not None and self.sensor_view_is_open(self.clock_table):
+            self.update_clock_table(self.latest_clocks)
+
+    def update_clock_table(self, clocks: tuple[Clock, ...]) -> None:
         clock_rows = [
             ((reading.device, reading.device.casefold()), (reading.channel, reading.channel.casefold()),
              (f"{reading.mhz:.0f} MHz", reading.mhz), (reading.source, reading.source))
@@ -504,7 +543,7 @@ class MainWindow(QtWidgets.QMainWindow):
                  (module.speed or "—", -1.0), ("Firmware specification", "firmware specification"))
             )
         for category, channel, present in (
-            ("CPU", "CPU frequency", bool(cpu)),
+            ("CPU", "CPU frequency", any(item.category == "CPU" for item in clocks)),
             ("GPU", "GPU frequency", any(item.category == "GPU" for item in clocks)),
             ("RAM", "RAM transfer rate", bool(self.hardware.memory)),
         ):
@@ -595,8 +634,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if any(worker.isRunning() for worker in self.workers):
             event.ignore()
             self.closing = True
-            for worker in self.workers:
-                worker.stopped.set()
+            self.sampler.stopped.set()
+            self.hardware_sampler.stop()
             return
         super().closeEvent(event)
 

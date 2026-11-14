@@ -1,3 +1,5 @@
+# made by Péter Noé
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from logging import getLogger

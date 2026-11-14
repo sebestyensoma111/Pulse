@@ -119,10 +119,14 @@ def windows_disk_temperatures() -> tuple[Temperature, ...]:
     )
 
 
-def read_sensors(hardware: Hardware) -> tuple[tuple[Temperature, ...], tuple[Clock, ...]]:
+def read_sensors(
+    hardware: Hardware, *, include_temperatures: bool = True,
+) -> tuple[tuple[Temperature, ...], tuple[Clock, ...]]:
     temperatures, clocks = nvidia_readings()
     if sys.platform == "linux":
-        return linux_temperatures(hardware) + temperatures, linux_clocks(hardware) + clocks
+        if include_temperatures:
+            temperatures = linux_temperatures(hardware) + temperatures
+        return temperatures, linux_clocks(hardware) + clocks
     if sys.platform == "win32":
         try:
             frequency = psutil.cpu_freq()
@@ -131,5 +135,7 @@ def read_sensors(hardware: Hardware) -> tuple[tuple[Temperature, ...], tuple[Clo
         if frequency and frequency.current > 0:
             clocks = (Clock(hardware.cpu_model or "CPU", "Reported CPU frequency", frequency.current,
                             "Windows · may be nominal"),) + clocks
-        return temperatures + windows_disk_temperatures(), clocks
+        if include_temperatures:
+            temperatures += windows_disk_temperatures()
+        return temperatures, clocks
     return temperatures, clocks
