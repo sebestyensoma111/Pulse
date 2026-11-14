@@ -1,15 +1,17 @@
 # made by Péter Noé
 
 from collections import deque
+from dataclasses import replace
 from sys import platform
 from threading import Event
 from time import monotonic
 
 from pulse.core.clocks import Clock
 from pulse.core.gpu import Gpu
-from pulse.core.hardware import Hardware, read_hardware
+from pulse.core.hardware import Drive, Hardware, linux_drives, read_hardware
 from pulse.core.monitor import Monitor, Snapshot
-from pulse.core.temperatures import TemperatureStats, read_sensors
+from pulse.core.smart import SmartReport, read_smart
+from pulse.core.temperatures import LinuxThermals, TemperatureStats, read_sensors
 from pulse.ui.qt import QtCore, QtGui, QtWidgets, Signal, Slot
 
 Qt = QtCore.Qt
@@ -17,6 +19,7 @@ Qt = QtCore.Qt
 METRICS = ("CPU", "Memory", "Storage", "Network")
 COLORS = ("#70e0bd", "#a2aeff", "#ffd08a", "#7ccfff")
 HARDWARE_PAGE = len(METRICS) + 1
+SMART_PAGE = HARDWARE_PAGE + 1
 RATE_CHANNELS = (("Read", "Write"), ("Download", "Upload"))
 RATE_ACCENTS = ("#ffd08a", "#c2a5ff")
 
@@ -41,8 +44,10 @@ QStatusBar, QStatusBar QLabel { background: #0b1018; color: #a6b2c1; }
 QLabel#title { font-size: 30px; font-weight: 700; }
 QLabel#muted { color: #a6b2c1; }
 QLabel#reading { font-size: 23px; font-weight: 600; }
-QPushButton, QLineEdit { background: #222f40; border: 1px solid #394b61;
+QPushButton, QLineEdit, QComboBox { background: #222f40; border: 1px solid #394b61;
     border-radius: 6px; padding: 8px 12px; }
+QPushButton:disabled { color: #8492a5; }
+QComboBox QAbstractItemView { background: #172331; selection-background-color: #285b73; }
 QPushButton:hover, QPushButton:focus, QLineEdit:focus { border-color: #70e0bd; }
 QPushButton#card { background: #1a2330; border-radius: 12px; }
 QPushButton#card:hover, QPushButton#card:focus { background: #202d3d; }
@@ -143,10 +148,30 @@ class HardwareSampler(QtCore.QThread):
     def run(self) -> None:
         hardware = read_hardware()
         self.hardware_ready.emit(hardware)
+        thermals = LinuxThermals() if platform == "linux" else None
+        rescan_at = monotonic() + 15
         interval = 10 if platform == "win32" else 2
         while not self.stopped.is_set():
-            self.sensors_ready.emit(read_sensors(hardware))
-            self.stopped.wait(interval)
+            started = monotonic()
+            if platform == "linux" and started >= rescan_at:
+                drives = linux_drives()
+                if drives is not None and drives != hardware.drives:
+                    hardware = replace(hardware, drives=drives)
+                    self.hardware_ready.emit(hardware)
+                rescan_at = started + 15
+            self.sensors_ready.emit(read_sensors(hardware, thermals))
+            self.stopped.wait(max(0.0, interval - (monotonic() - started)))
+
+
+class SmartReader(QtCore.QThread):
+    report_ready = Signal(object)
+
+    def __init__(self, parent: QtWidgets.QWidget, drive: Drive) -> None:
+        super().__init__(parent)
+        self.drive = drive
+
+    def run(self) -> None:
+        self.report_ready.emit(read_smart(self.drive))
 
 
 class Sparkline(QtWidgets.QWidget):
@@ -393,6 +418,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for index in range(len(METRICS)):
             self.build_detail(index)
         self.build_hardware_page()
+        self.build_smart_page()
         self.setup_tray()
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().showMessage("Sampling system metrics…")
@@ -534,6 +560,10 @@ class MainWindow(QtWidgets.QMainWindow):
         back.clicked.connect(lambda: self.navigate(0))
         layout.addWidget(back, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(label(METRICS[index], "title"))
+        if index == 2:
+            smart = QtWidgets.QPushButton("SMART →")
+            smart.clicked.connect(lambda: self.navigate(SMART_PAGE))
+            layout.addWidget(smart, alignment=Qt.AlignmentFlag.AlignLeft)
         reading = label("—", "reading")
         note = label("Waiting for first sample", "muted")
         note.setWordWrap(True)
@@ -619,6 +649,88 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.stack.addWidget(page)
 
+    def build_smart_page(self) -> None:
+        page = QtWidgets.QWidget()
+        page.setObjectName("page")
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(24, 18, 24, 18)
+        back = QtWidgets.QPushButton("← Storage")
+        back.clicked.connect(lambda: self.navigate(3))
+        layout.addWidget(back, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(label("SMART", "title"))
+        controls = QtWidgets.QHBoxLayout()
+        self.smart_drives = QtWidgets.QComboBox()
+        self.smart_drives.setAccessibleName("Physical drive")
+        self.smart_drives.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.smart_drives.currentIndexChanged.connect(self.refresh_smart)
+        controls.addWidget(self.smart_drives, 1)
+        self.smart_refresh = QtWidgets.QPushButton("Refresh")
+        self.smart_refresh.setEnabled(False)
+        self.smart_refresh.clicked.connect(self.refresh_smart)
+        controls.addWidget(self.smart_refresh)
+        layout.addLayout(controls)
+        self.smart_status = label("Waiting for drive inventory…", "reading")
+        self.smart_status.setWordWrap(True)
+        layout.addWidget(self.smart_status)
+        self.smart_note = label("", "muted")
+        self.smart_note.setWordWrap(True)
+        self.smart_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.smart_note)
+        self.smart_table = DataTable(("Attribute", "Value"))
+        layout.addWidget(self.smart_table, 1)
+        self.smart_reader: SmartReader | None = None
+        self.stack.addWidget(page)
+
+    def refresh_smart(self) -> None:
+        if self.stack.currentIndex() != SMART_PAGE or self.closing or self.smart_reader is not None:
+            return
+        drive = self.smart_drives.currentData()
+        if drive is None:
+            return
+        self.smart_drives.setEnabled(False)
+        self.smart_refresh.setEnabled(False)
+        self.show_smart_report(SmartReport("Reading drive diagnostics…"))
+        self.smart_reader = SmartReader(self, drive)
+        self.smart_reader.report_ready.connect(self.apply_smart_report)
+        self.smart_reader.finished.connect(self.finish_smart_read)
+        self.smart_reader.start()
+
+    @Slot(object)
+    def apply_smart_report(self, report: SmartReport) -> None:
+        if self.smart_reader is not None and self.smart_reader.drive == self.smart_drives.currentData():
+            self.show_smart_report(report)
+
+    @Slot(object)
+    def show_smart_report(self, report: SmartReport) -> None:
+        self.smart_status.setText(report.status)
+        self.smart_note.setText(report.note)
+        self.smart_note.setVisible(bool(report.note))
+        drive = self.smart_drives.currentData()
+        rows = report.rows
+        if drive is not None:
+            rows = (
+                ("Model", drive.model or "—"),
+                ("Device", drive.name),
+                ("Type", drive.kind or "—"),
+                ("Capacity", drive_capacity(drive.capacity)),
+            ) + rows
+        self.smart_table.update_rows(
+            ((name, index), (value, value.casefold())) for index, (name, value) in enumerate(rows)
+        )
+
+    @Slot()
+    def finish_smart_read(self) -> None:
+        drive = self.smart_reader.drive
+        self.smart_reader.deleteLater()
+        self.smart_reader = None
+        self.smart_drives.setEnabled(self.smart_drives.count() > 0)
+        self.smart_refresh.setEnabled(self.smart_drives.count() > 0)
+        if self.smart_drives.currentData() != drive:
+            self.refresh_smart()
+        self.finish_close()
+
     def open_gpu(self) -> None:
         self.hardware_tabs.setCurrentWidget(self.gpu_table.parentWidget())
         self.navigate(HARDWARE_PAGE)
@@ -646,11 +758,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.animation = None
             old_page.setGraphicsEffect(None)
         self.stack.setCurrentIndex(page)
-        self.title_bar.location.setText(("Overview", *METRICS, "Hardware")[page])
+        self.title_bar.location.setText(("Overview", *METRICS, "Hardware", "SMART")[page])
         self.sampler.page = page
         self.update_sensor_view()
         if 0 < page < HARDWARE_PAGE:
             self.update_detail(page - 1)
+        elif page == SMART_PAGE:
+            self.refresh_smart()
         current = self.stack.currentWidget()
         effect = QtWidgets.QGraphicsOpacityEffect(current)
         current.setGraphicsEffect(effect)
@@ -671,6 +785,22 @@ class MainWindow(QtWidgets.QMainWindow):
     @Slot(object)
     def update_hardware(self, hardware: Hardware) -> None:
         self.hardware = hardware
+        selected = self.smart_drives.currentData()
+        with QtCore.QSignalBlocker(self.smart_drives):
+            self.smart_drives.clear()
+            for drive in hardware.drives:
+                model = drive.model or "Drive"
+                self.smart_drives.addItem(f"{model} · {drive.name} · {drive_capacity(drive.capacity)}", drive)
+                if drive == selected:
+                    self.smart_drives.setCurrentIndex(self.smart_drives.count() - 1)
+        ready = bool(hardware.drives) and self.smart_reader is None
+        self.smart_drives.setEnabled(ready)
+        self.smart_refresh.setEnabled(ready)
+        if not hardware.drives:
+            self.show_smart_report(SmartReport("No physical drives detected"))
+        elif selected != self.smart_drives.currentData():
+            self.show_smart_report(SmartReport("Select a drive to read diagnostics"))
+            self.refresh_smart()
         inventory = [
             (device.category, device.model, device.identifier, device.driver)
             for device in hardware.devices
@@ -706,7 +836,8 @@ class MainWindow(QtWidgets.QMainWindow):
             table.setVisible(bool(rows))
         self.hardware_notes[1].setText(
             "CAS latency (CL) unavailable" if hardware.memory
-            else "Memory module details are unavailable. Total usable RAM is shown above."
+            else (hardware.memory_note or "Memory module details are unavailable.")
+            + " Total usable RAM is shown above."
         )
         self.hardware_notes[2].setText("Physical drive details are unavailable.")
         self.hardware_notes[2].setVisible(not hardware.drives)
@@ -831,7 +962,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 chart.update()
         if self.tray is not None:
             self.tray.setToolTip(f"Pulse\nCPU {readings[0]} · RAM {readings[1]}")
-        if 0 < self.stack.currentIndex() < HARDWARE_PAGE:
+        if self.isVisible() and not self.isMinimized() and 0 < self.stack.currentIndex() < HARDWARE_PAGE:
             self.update_detail(self.stack.currentIndex() - 1)
 
     def update_detail(self, index: int) -> None:
@@ -927,7 +1058,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tray.hide()
 
     def closeEvent(self, event) -> None:
-        if any(worker.isRunning() for worker in self.workers):
+        if self.smart_reader is not None or any(worker.isRunning() for worker in self.workers):
             event.ignore()
             self.closing = True
             self.sampler.stopped.set()
@@ -939,5 +1070,5 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @Slot()
     def finish_close(self) -> None:
-        if self.closing and not any(worker.isRunning() for worker in self.workers):
+        if self.closing and self.smart_reader is None and not any(worker.isRunning() for worker in self.workers):
             self.close()

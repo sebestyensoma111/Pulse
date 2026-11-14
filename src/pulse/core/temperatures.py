@@ -3,6 +3,7 @@ import math
 import re
 import shutil
 import sys
+from time import monotonic
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import psutil
 
 from pulse.core.clocks import Clock, linux_clocks, mhz
 from pulse.core.gpu import Gpu, detected_gpus
-from pulse.core.hardware import Hardware, command, json_object, sys_text
+from pulse.core.hardware import Hardware, command, json_object, object_rows, sys_path, sys_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,31 +30,36 @@ def degrees(raw: str, scale: float = 1) -> float | None:
     return value if math.isfinite(value) and value >= -273.15 else None
 
 
-def linux_temperatures(hardware: Hardware, root: Path = Path("/sys")) -> tuple[Temperature, ...]:
+@dataclass(frozen=True, slots=True)
+class ThermalChannel:
+    path: Path
+    device: str
+    sensor: str
+    source: str
+    zone: Path | None = None
+
+
+def thermal_channels(hardware: Hardware, root: Path) -> tuple[ThermalChannel, ...]:
     pci_models = {d.identifier: d.model or d.identifier for d in hardware.devices if d.identifier}
     drives = {}
     for drive in hardware.drives:
-        path = (root / "class/block" / drive.name).resolve()
+        path = sys_path(root / "class/block" / drive.name)
         # Közös NVMe vezérlő
         for node in reversed(path.parents):
             if re.fullmatch(r"nvme\d+", node.name):
                 drives.setdefault(node, set()).add(drive.model or drive.name)
         drives.setdefault(path, set()).add(drive.model or drive.name)
         if (path / "device").exists():
-            drives.setdefault((path / "device").resolve(), set()).add(drive.model or drive.name)
+            drives.setdefault(sys_path(path / "device"), set()).add(drive.model or drive.name)
     wifi = [d.model for d in hardware.devices if d.driver == "iwlwifi" and d.model]
 
-    readings = []
-    covered_zones = set()
+    channels = []
     for hwmon in sorted((root / "class/hwmon").glob("hwmon*")):
         driver = sys_text(hwmon / "name")
-        device = (hwmon / "device").resolve()
+        device = sys_path(hwmon / "device")
         disk = " / ".join(sorted(drives.get(device, ())))
         pci = next((pci_models[node] for node in reversed(device.parts) if node in pci_models), "")
         for entry in sorted(hwmon.glob("temp*_input")):
-            value = degrees(sys_text(entry), 1000)
-            if value is None:
-                continue
             channel = entry.name.removesuffix("_input")
             label = sys_text(hwmon / f"{channel}_label")
             model = disk or pci or driver or hwmon.name
@@ -68,18 +74,43 @@ def linux_temperatures(hardware: Hardware, root: Path = Path("/sys")) -> tuple[T
             elif not disk and not pci and label == "CPU":
                 model = hardware.cpu_model or "CPU"
             source = f"{driver or 'hwmon'} · {hwmon.name}"
-            readings.append(Temperature(model, label or channel, value, source))
-            if device.name.startswith("thermal_zone"):
-                covered_zones.add(device)
+            zone = device if device.name.startswith("thermal_zone") else None
+            channels.append(ThermalChannel(entry, model, label or channel, source, zone))
     for zone in sorted((root / "class/thermal").glob("thermal_zone*")):
-        if zone.resolve() in covered_zones:
-            continue
         label = sys_text(zone / "type") or zone.name
-        value = degrees(sys_text(zone / "temp"), 1000)
-        if value is not None:
-            model = (hardware.cpu_model or "CPU") if label == "x86_pkg_temp" else "Thermal zone"
-            readings.append(Temperature(model, label, value, zone.name))
-    return tuple(readings)
+        model = (hardware.cpu_model or "CPU") if label == "x86_pkg_temp" else "Thermal zone"
+        channels.append(ThermalChannel(zone / "temp", model, label, zone.name, sys_path(zone)))
+    return tuple(channels)
+
+
+class LinuxThermals:
+    def __init__(self, root: Path = Path("/sys")) -> None:
+        self.root = root
+        self.channels: tuple[ThermalChannel, ...] = ()
+        self.refresh_at = 0.0
+        self.hardware: Hardware | None = None
+
+    def read(self, hardware: Hardware) -> tuple[Temperature, ...]:
+        now = monotonic()
+        if now >= self.refresh_at or hardware is not self.hardware:
+            self.channels = thermal_channels(hardware, self.root)
+            self.hardware = hardware
+            self.refresh_at = now + 15
+        readings = []
+        covered_zones = set()
+        for channel in self.channels:
+            if channel.zone in covered_zones:
+                continue
+            value = degrees(sys_text(channel.path), 1000)
+            if value is not None:
+                readings.append(Temperature(channel.device, channel.sensor, value, channel.source))
+                if channel.zone is not None:
+                    covered_zones.add(channel.zone)
+        return tuple(readings)
+
+
+def linux_temperatures(hardware: Hardware, root: Path = Path("/sys")) -> tuple[Temperature, ...]:
+    return LinuxThermals(root).read(hardware)
 
 
 @dataclass(slots=True)
@@ -141,14 +172,15 @@ def windows_disk_temperatures() -> tuple[Temperature, ...]:
     )
     return tuple(
         Temperature(row.get("name") or "Physical drive", "Drive temperature", value, f"Disk {row['id']}")
-        for row in json_object(output).get("drives", ()) if (value := degrees(row.get("temp"))) is not None
+        for row in object_rows(json_object(output).get("drives"))
+        if row.get("id") is not None and (value := degrees(row.get("temp"))) is not None
     )
 
 
-def read_sensors(hardware: Hardware) -> tuple[tuple[Temperature, ...], tuple[Clock, ...], tuple[Gpu, ...]]:
+def read_sensors(hardware: Hardware, thermals: LinuxThermals | None = None) -> tuple[tuple[Temperature, ...], tuple[Clock, ...], tuple[Gpu, ...]]:
     temperatures, clocks, gpus = nvidia_readings()
     if sys.platform == "linux":
-        temperatures = linux_temperatures(hardware) + temperatures
+        temperatures = (thermals or LinuxThermals()).read(hardware) + temperatures
         clocks = linux_clocks(hardware) + clocks
     elif sys.platform == "win32":
         try:

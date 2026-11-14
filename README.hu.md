@@ -58,6 +58,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 
 ## Mikor jelennek meg az adatok?
 
+- A **Storage → SMART** nézetben választhatsz fizikai meghajtót. Linuxon a `smartmontools` csomag és az eszköz olvasásához szükséges jogosultság kell. Windowson a tárolóillesztő által közölt állapot és megbízhatósági számlálók jelennek meg. A kiolvasható mezők a meghajtótól és az adaptertől függenek.
 - A lemez- és hálózati sebességhez két mérés kell. A kötőjel vagy az **Unavailable** azt jelzi, hogy az app nem kapott adatot.
 - Linuxon a meghajtóadatokat az `lsblk`, a RAM-modulok adatait a `dmidecode` adja. A rendszer korlátozhatja a moduladatok olvasását. A CAS-késleltetés (CL) nem érhető el.
 - Linuxon a CPU órajele logikai magonként jelenik meg, ha kiolvasható. Windowson az érték névleges is lehet. A GPU adatai az illesztőprogramtól függenek, az NVIDIA-adatokhoz az `nvidia-smi` kell.

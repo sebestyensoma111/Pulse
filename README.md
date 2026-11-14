@@ -58,6 +58,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 
 ## Reading availability
 
+- Open **Storage → SMART** to select a physical drive and read its diagnostics. On Linux, install `smartmontools` and ensure `smartctl` can read the device. On Windows, Pulse shows the health and reliability counters exposed by the storage provider. The available fields depend on the drive and adapter.
 - Disk and network rates need two samples. A dash or **Unavailable** means the app has no reading for that field.
 - On Linux, Pulse uses `lsblk` for drive details and `dmidecode` for RAM modules. The system may restrict access to module details. CAS latency (CL) is unavailable.
 - Linux CPU frequencies are shown per logical CPU where available. Windows may report a nominal CPU frequency. GPU readings depend on the driver, and NVIDIA readings require `nvidia-smi`.

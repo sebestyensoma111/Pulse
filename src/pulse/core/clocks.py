@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from pulse.core.hardware import Hardware, sys_text
+from pulse.core.hardware import Hardware, sys_path, sys_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ def linux_clocks(hardware: Hardware, root: Path = Path("/sys")) -> tuple[Clock, 
     for card in sorted((root / "class/drm").glob("card*")):
         if not re.fullmatch(r"card\d+", card.name):
             continue
-        device = (card / "device").resolve()
+        device = sys_path(card / "device")
         address = device.name
         model = models.get(address) or card.name
         source = f"{card.name} · {address}"

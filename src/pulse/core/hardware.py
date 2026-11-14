@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,6 +38,7 @@ class Hardware:
     memory: tuple[MemoryModule, ...] = ()
     drives: tuple[Drive, ...] = ()
     devices: tuple[Device, ...] = ()
+    memory_note: str = ""
 
 
 MEMORY_TYPES = {
@@ -47,15 +49,20 @@ MEDIA_TYPES = {3: "HDD", 4: "SSD", 5: "SCM"}
 BUS_TYPES = {3: "ATA", 7: "USB", 10: "SAS", 11: "SATA", 17: "NVMe", 18: "SCM", 19: "UFS"}
 
 
-def command(*args: str) -> str:
+def run_command(*args: str) -> subprocess.CompletedProcess[str] | None:
     try:
-        result = subprocess.run(
-            args, check=True, capture_output=True, encoding="utf-8", errors="replace",
+        return subprocess.run(
+            args, capture_output=True, encoding="utf-8", errors="replace",
             timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env={**os.environ, "LC_ALL": "C"} if sys.platform == "linux" else None,
         )
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return result.stdout
+        return None
+
+
+def command(*args: str) -> str:
+    result = run_command(*args)
+    return result.stdout if result is not None and result.returncode == 0 else ""
 
 
 def json_object(output: str) -> dict:
@@ -66,8 +73,14 @@ def json_object(output: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def object_rows(value: object) -> tuple[dict, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(row for row in value if isinstance(row, dict))
+
+
 def clean(value: str | None) -> str:
-    value = (value or "").strip()
+    value = value.strip() if isinstance(value, str) else ""
     if value.casefold() in {"unknown", "not specified", "not provided", "none", "n/a"}:
         return ""
     return value
@@ -78,6 +91,13 @@ def sys_text(path: Path) -> str:
         return clean(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return ""
+
+
+def sys_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path
 
 
 def joined(*parts: str) -> str:
@@ -112,7 +132,7 @@ def linux_devices() -> tuple[Device, ...]:
         if not model:
             ids = (sys_text(path / field).removeprefix("0x") for field in ("vendor", "device"))
             model = ":".join(ids).strip(":")
-        driver = (path / "driver").resolve().name if (path / "driver").is_symlink() else ""
+        driver = sys_path(path / "driver").name if (path / "driver").is_symlink() else ""
         devices.append(Device(category, model, path.name, driver))
 
     for path in sorted(Path("/sys/bus/usb/devices").glob("*")):
@@ -130,7 +150,7 @@ def linux_devices() -> tuple[Device, ...]:
 def positive(value: int | str | None) -> int | None:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if number > 0 else None
 
@@ -157,32 +177,40 @@ def parse_dmi_memory(output: str) -> tuple[MemoryModule, ...]:
     return tuple(modules)
 
 
-def linux_hardware() -> Hardware:
-    cpu_model = ""
-    try:
-        info = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
-        match = re.search(r"(?m)^model name\s*:\s*(.+)$", info)
-        if match:
-            cpu_model = match[1].strip()
-    except OSError:
-        pass
-
-    devices = json_object(command(
+def linux_drives() -> tuple[Drive, ...] | None:
+    data = json_object(command(
         "lsblk", "--bytes", "--nodeps", "--json", "--output", "NAME,TYPE,SIZE,ROTA,TRAN,MODEL",
     ))
+    if not isinstance(data.get("blockdevices"), list):
+        return None
     drives = []
-    for disk in devices.get("blockdevices", ()):
-        if disk["type"] != "disk" or not positive(disk["size"]):
+    for disk in object_rows(data["blockdevices"]):
+        name = clean(disk.get("name"))
+        capacity = positive(disk.get("size"))
+        if disk.get("type") != "disk" or not name or not capacity:
             continue
-        bus = clean(disk["tran"])
-        medium = {True: "HDD", False: "SSD"}.get(disk["rota"], "")
+        bus = clean(disk.get("tran"))
+        rotational = disk.get("rota")
+        medium = ("HDD" if rotational else "SSD") if isinstance(rotational, bool) else ""
         if bus == "nvme":
             bus, medium = "NVMe", "SSD"
-        drives.append(Drive(disk["name"], clean(disk["model"]),
-                            " ".join(filter(None, (bus, medium))), positive(disk["size"])))
+        drives.append(Drive(name, clean(disk.get("model")), joined(bus, medium), capacity))
+    return tuple(drives)
 
-    modules = parse_dmi_memory(command("dmidecode", "--type", "memory"))
-    return Hardware(cpu_model, modules, tuple(drives), linux_devices())
+
+def linux_hardware() -> Hardware:
+    info = sys_text(Path("/proc/cpuinfo"))
+    match = re.search(r"(?m)^model name\s*:\s*(.+)$", info)
+    cpu_model = match[1].strip() if match else ""
+    result = run_command("dmidecode", "--type", "17")
+    modules = ()
+    note = "Memory module details are unavailable."
+    if result is not None:
+        if result.returncode == 0:
+            modules = parse_dmi_memory(result.stdout)
+        elif any(error in result.stderr.casefold() for error in ("permission denied", "operation not permitted")):
+            note = "Memory module details are unavailable (permission denied)."
+    return Hardware(cpu_model, modules, linux_drives() or (), linux_devices(), note if not modules else "")
 
 
 def windows_hardware() -> Hardware:
@@ -211,7 +239,7 @@ def windows_hardware() -> Hardware:
         "ConvertTo-Json -Depth 4 -Compress",
     ))
     modules = []
-    for row in data.get("memory", ()):
+    for row in object_rows(data.get("memory")):
         configured = positive(row.get("ConfiguredClockSpeed"))
         rated = positive(row.get("Speed"))
         speed = f"{configured} MT/s" if configured else ""
@@ -220,26 +248,29 @@ def windows_hardware() -> Hardware:
         modules.append(MemoryModule(
             clean(row.get("DeviceLocator")),
             " ".join(filter(None, (clean(row.get("Manufacturer")), clean(row.get("PartNumber"))))),
-            MEMORY_TYPES.get(row.get("SMBIOSMemoryType"), ""),
+            MEMORY_TYPES.get(positive(row.get("SMBIOSMemoryType")), ""),
             positive(row.get("Capacity")), speed,
         ))
     drives = tuple(
-        Drive(str(row.get("DeviceId") or ""), clean(row.get("Model")) or clean(row.get("FriendlyName")),
-              " ".join(filter(None, (BUS_TYPES.get(row.get("BusType")), MEDIA_TYPES.get(row.get("MediaType"))))),
+        Drive(str(row["DeviceId"]), clean(row.get("Model")) or clean(row.get("FriendlyName")),
+              joined(BUS_TYPES.get(positive(row.get("BusType")), ""),
+                     MEDIA_TYPES.get(positive(row.get("MediaType")), "")),
               positive(row.get("Size")))
-        for row in data.get("drives", ())
+        for row in object_rows(data.get("drives")) if row.get("DeviceId") is not None
     )
     categories = {"Display": "GPU", "Net": "Network", "MEDIA": "Multimedia"}
     devices = [
         Device(categories.get(row["PNPClass"], row["PNPClass"]), clean(row.get("Name")),
                clean(row.get("PNPDeviceID")))
-        for row in data.get("devices", ()) if row.get("PNPClass") and row.get("Name")
+        for row in object_rows(data.get("devices")) if clean(row.get("PNPClass")) and clean(row.get("Name"))
     ]
     for key, category, model_key in (
         ("board", "Motherboard", "Product"), ("bios", "BIOS", "SMBIOSBIOSVersion"),
         ("system", "System", "Model"),
     ):
         row = data.get(key) or {}
+        if not isinstance(row, dict):
+            continue
         model = joined(clean(row.get("Manufacturer")), clean(row.get(model_key)))
         if model:
             devices.append(Device(category, model))
