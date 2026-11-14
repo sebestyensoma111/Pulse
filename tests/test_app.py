@@ -1,4 +1,5 @@
 import unittest
+from sys import platform
 from time import monotonic, sleep
 
 from pulse.ui.main_window import HARDWARE_PAGE, MainWindow
@@ -48,6 +49,12 @@ class AppTests(unittest.TestCase):
                 lambda: window.latest_clocks is not None and window.clock_table.model().rowCount() > 0,
                 "The clock table did not load",
             )
+            window.hide()
+            self.assertEqual(window.sampler.view, (0, False))
+            self.assertEqual(window.hardware_sampler.interval, 20 if platform == "win32" else 10)
+            window.show()
+            self.assertEqual(window.sampler.view, (HARDWARE_PAGE, True))
+            self.assertEqual(window.hardware_sampler.interval, 10 if platform == "win32" else 2)
         finally:
             window.close()
             self.wait_for(

@@ -55,6 +55,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 - **Hardware → GPU** shows load, VRAM, clock, temperature, and power when the driver reports them. NVIDIA uses `nvidia-smi`, and Linux AMD cards use driver sensors.
 - **Hardware → Temperatures** tracks minimum, sample average, and maximum for each sensor from startup. Sampling continues in the tray.
 - The **↓** button hides Pulse to the system tray when the desktop supports it. The tray icon shows CPU and RAM usage and lets you reopen or quit Pulse.
+- While hidden or minimized, system metrics update every 5 seconds and hardware sensors every 10 seconds on Linux or 20 seconds on Windows. Brief peaks between samples may be missed.
 
 ## Reading availability
 

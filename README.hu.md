@@ -55,6 +55,7 @@ PYTHONPATH=src .venv/bin/python -m pulse
 - A **Hardware → GPU** fülön a terhelés, a VRAM, az órajel, a hőfok és a fogyasztás látszik, ha az illesztőprogram megadja ezeket. NVIDIA-nál az `nvidia-smi`, Linuxos AMD kártyánál a driver szenzorai adják az adatokat.
 - A **Hardware → Temperatures** fül szenzoronként mutatja az indulás óta mért minimumot, a minták átlagát és a maximumot. A mérés tálcamódban is folytatódik.
 - A **↓** gomb a rendszertálcára rejti a Pulse-t, ha az asztali környezet támogatja. A tálcaikon mutatja a CPU- és RAM-használatot, és onnan visszanyithatod vagy bezárhatod az appot.
+- Rejtett vagy minimalizált ablaknál a rendszeradatok 5 másodpercenként, a hardverszenzorok Linuxon 10, Windowson 20 másodpercenként frissülnek. A minták közti rövid kiugrások kimaradhatnak.
 
 ## Mikor jelennek meg az adatok?
 

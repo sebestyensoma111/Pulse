@@ -119,19 +119,34 @@ class Sampler(QtCore.QThread):
     def __init__(self, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
         self.stopped = Event()
-        self.page = 0
+        self.refresh = Event()
+        self.view = (0, True)
+
+    def set_view(self, page: int, visible: bool) -> None:
+        view = (page if visible else 0, visible)
+        if self.view != view:
+            self.view = view
+            self.refresh.set()
+
+    def stop(self) -> None:
+        self.stopped.set()
+        self.refresh.set()
 
     def run(self) -> None:
         monitor = Monitor()
-        while not self.stopped.is_set():
+        while True:
+            self.refresh.clear()
+            if self.stopped.is_set():
+                break
             started = monotonic()
-            page = self.page
+            page, visible = self.view
             self.sampled.emit(monitor.sample(
                 include_processes=page in (1, 2),
                 include_volumes=page == 3,
                 include_interfaces=page == 4,
             ))
-            self.stopped.wait(max(0.0, 1.0 - (monotonic() - started)))
+            interval = 1 if visible else 5
+            self.refresh.wait(max(0.0, interval - (monotonic() - started)))
 
 
 class HardwareSampler(QtCore.QThread):
@@ -141,17 +156,31 @@ class HardwareSampler(QtCore.QThread):
     def __init__(self, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
         self.stopped = Event()
+        self.refresh = Event()
+        self.interval = 10 if platform == "win32" else 4
+
+    def set_view(self, visible: bool, live_sensors: bool) -> None:
+        if platform == "win32":
+            interval = 10 if visible else 20
+        else:
+            interval = 2 if live_sensors else 4 if visible else 10
+        if interval != self.interval:
+            self.interval = interval
+            self.refresh.set()
 
     def stop(self) -> None:
         self.stopped.set()
+        self.refresh.set()
 
     def run(self) -> None:
         hardware = read_hardware()
         self.hardware_ready.emit(hardware)
         thermals = LinuxThermals() if platform == "linux" else None
         rescan_at = monotonic() + 15
-        interval = 10 if platform == "win32" else 2
-        while not self.stopped.is_set():
+        while True:
+            self.refresh.clear()
+            if self.stopped.is_set():
+                break
             started = monotonic()
             if platform == "linux" and started >= rescan_at:
                 drives = linux_drives()
@@ -160,7 +189,7 @@ class HardwareSampler(QtCore.QThread):
                     self.hardware_ready.emit(hardware)
                 rescan_at = started + 15
             self.sensors_ready.emit(read_sensors(hardware, thermals))
-            self.stopped.wait(max(0.0, interval - (monotonic() - started)))
+            self.refresh.wait(max(0.0, self.interval - (monotonic() - started)))
 
 
 class SmartReader(QtCore.QThread):
@@ -445,7 +474,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hardware_sampler = HardwareSampler(self)
         self.hardware_sampler.hardware_ready.connect(self.update_hardware)
         self.hardware_sampler.sensors_ready.connect(self.update_sensors)
-        self.hardware_tabs.currentChanged.connect(self.update_sensor_view)
+        self.hardware_tabs.currentChanged.connect(self.sensor_tab_changed)
         self.workers = (self.sampler, self.hardware_sampler)
         for worker in self.workers:
             worker.finished.connect(self.finish_close, Qt.ConnectionType.QueuedConnection)
@@ -459,6 +488,22 @@ class MainWindow(QtWidgets.QMainWindow):
         super().changeEvent(event)
         if event.type() == QtCore.QEvent.Type.WindowStateChange:
             self.update_window_frame()
+            self.sync_sampling_view()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.sync_sampling_view()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.sync_sampling_view()
+
+    def sync_sampling_view(self) -> None:
+        visible = self.isVisible() and not self.isMinimized()
+        page = self.stack.currentIndex()
+        self.sampler.set_view(page, visible)
+        live_sensors = visible and page == HARDWARE_PAGE and self.hardware_tabs.currentIndex() != 0
+        self.hardware_sampler.set_view(visible, live_sensors)
 
     def update_window_frame(self) -> None:
         if not self.resize_handles:
@@ -759,8 +804,7 @@ class MainWindow(QtWidgets.QMainWindow):
             old_page.setGraphicsEffect(None)
         self.stack.setCurrentIndex(page)
         self.title_bar.location.setText(("Overview", *METRICS, "Hardware", "SMART")[page])
-        self.sampler.page = page
-        self.update_sensor_view()
+        self.sensor_tab_changed()
         if 0 < page < HARDWARE_PAGE:
             self.update_detail(page - 1)
         elif page == SMART_PAGE:
@@ -874,8 +918,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_sensor_view()
 
     def sensor_view_is_open(self, table: DataTable) -> bool:
-        return (self.isVisible() and self.stack.currentIndex() == HARDWARE_PAGE
+        return (self.isVisible() and not self.isMinimized() and self.stack.currentIndex() == HARDWARE_PAGE
                 and self.hardware_tabs.currentWidget() is table.parentWidget())
+
+    def sensor_tab_changed(self) -> None:
+        self.sync_sampling_view()
+        self.update_sensor_view()
 
     def update_sensor_view(self) -> None:
         if self.sensor_view_is_open(self.temperature_table):
@@ -960,7 +1008,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for chart in self.rate_charts.values():
             if chart.isVisible():
                 chart.update()
-        if self.tray is not None:
+        if self.tray is not None and self.tray.isVisible():
             self.tray.setToolTip(f"Pulse\nCPU {readings[0]} · RAM {readings[1]}")
         if self.isVisible() and not self.isMinimized() and 0 < self.stack.currentIndex() < HARDWARE_PAGE:
             self.update_detail(self.stack.currentIndex() - 1)
@@ -1037,9 +1085,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def hide_to_tray(self) -> None:
         if self.tray is not None and QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.setToolTip(
+                f"Pulse\nCPU {self.readings[0].text()} · RAM {self.readings[1].text()}"
+            )
             self.tray.show()
             self.hide()
-            self.sampler.page = 0
         else:
             self.showMinimized()
 
@@ -1052,7 +1102,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
-        self.sampler.page = self.stack.currentIndex()
         self.update_sensor_view()
         if self.tray is not None:
             self.tray.hide()
@@ -1061,7 +1110,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.smart_reader is not None or any(worker.isRunning() for worker in self.workers):
             event.ignore()
             self.closing = True
-            self.sampler.stopped.set()
+            self.sampler.stop()
             self.hardware_sampler.stop()
             return
         if self.tray is not None:
