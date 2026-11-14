@@ -47,6 +47,8 @@ PYTHONPATH=src .venv/bin/python -m pulse
 | **Hardware** | Detected devices such as the GPU, motherboard, BIOS, and network adapters. The **Temperatures** tab labels readings by device and sensor. |
 | **Clocks** | CPU and GPU frequencies in MHz. RAM transfer rates in MT/s come from firmware and may be configured or rated values. |
 
+![Pulse temperature readings by device and sensor](assets/screenshots/temperatures.png)
+
 ## Reading availability
 
 - Disk and network rates need two samples. A dash or **Unavailable** means the app has no reading for that field.

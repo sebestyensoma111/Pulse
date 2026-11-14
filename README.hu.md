@@ -47,6 +47,8 @@ PYTHONPATH=src .venv/bin/python -m pulse
 | **Hardware** | Felismert eszközök, például a GPU, az alaplap, a BIOS és a hálózati adapterek. A **Temperatures** fülön a hőfok mellett az eszköz és a szenzor neve is látszik. |
 | **Clocks** | CPU- és GPU-órajelek MHz-ben. A RAM sebessége MT/s-ban jelenik meg, a firmware által közölt beállított vagy névleges érték alapján. |
 
+![Hőmérsékletek eszköz és szenzor szerint](assets/screenshots/temperatures.png)
+
 ## Mikor jelennek meg az adatok?
 
 - A lemez- és hálózati sebességhez két mérés kell. A kötőjel vagy az **Unavailable** azt jelzi, hogy az app nem kapott adatot.
