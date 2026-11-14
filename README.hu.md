@@ -49,6 +49,13 @@ PYTHONPATH=src .venv/bin/python -m pulse
 
 ![Hőmérsékletek eszköz és szenzor szerint](assets/screenshots/temperatures.png)
 
+## Élő grafikonok és tálcamód
+
+- A **Storage** és a **Network** grafikonján két görbe fut közös skálán. A folytonos vonal az olvasást vagy a letöltést, a szaggatott az írást vagy a feltöltést mutatja.
+- A **Hardware → GPU** fülön a terhelés, a VRAM, az órajel, a hőfok és a fogyasztás látszik, ha az illesztőprogram megadja ezeket. NVIDIA-nál az `nvidia-smi`, Linuxos AMD kártyánál a driver szenzorai adják az adatokat.
+- A **Hardware → Temperatures** fül szenzoronként mutatja az indulás óta mért minimumot, a minták átlagát és a maximumot. A mérés tálcamódban is folytatódik.
+- A **↓** gomb a rendszertálcára rejti a Pulse-t, ha az asztali környezet támogatja. A tálcaikon mutatja a CPU- és RAM-használatot, és onnan visszanyithatod vagy bezárhatod az appot.
+
 ## Mikor jelennek meg az adatok?
 
 - A lemez- és hálózati sebességhez két mérés kell. A kötőjel vagy az **Unavailable** azt jelzi, hogy az app nem kapott adatot.

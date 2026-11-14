@@ -6,9 +6,10 @@ from threading import Event
 from time import monotonic
 
 from pulse.core.clocks import Clock
+from pulse.core.gpu import Gpu
 from pulse.core.hardware import Hardware, read_hardware
 from pulse.core.monitor import Monitor, Snapshot
-from pulse.core.temperatures import read_sensors
+from pulse.core.temperatures import TemperatureStats, read_sensors
 from pulse.ui.qt import QtCore, QtGui, QtWidgets, Signal, Slot
 
 Qt = QtCore.Qt
@@ -16,6 +17,8 @@ Qt = QtCore.Qt
 METRICS = ("CPU", "Memory", "Storage", "Network")
 COLORS = ("#70e0bd", "#a2aeff", "#ffd08a", "#7ccfff")
 HARDWARE_PAGE = len(METRICS) + 1
+RATE_CHANNELS = (("Read", "Write"), ("Download", "Upload"))
+RATE_ACCENTS = ("#ffd08a", "#c2a5ff")
 
 STYLE = """
 QWidget { background: #10151d; color: #e6edf5; font-size: 14px; }
@@ -80,6 +83,12 @@ def percent(value: float | None) -> str:
     return "—" if value is None else f"{value:.1f}%"
 
 
+def numeric_cell(value: float | None, unit: str, precision: int = 1) -> tuple[str, float]:
+    if value is None:
+        return "—", float("-inf")
+    return f"{value:.{precision}f} {unit}", value
+
+
 def uptime_text(seconds: int | None) -> str:
     if seconds is None:
         return "Uptime · —"
@@ -127,76 +136,68 @@ class HardwareSampler(QtCore.QThread):
     def __init__(self, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
         self.stopped = Event()
-        self.temperature_view = Event()
-        self.refresh = Event()
-
-    def set_temperature_view(self, visible: bool) -> None:
-        if visible and not self.temperature_view.is_set():
-            self.temperature_view.set()
-            self.refresh.set()
-        elif not visible:
-            self.temperature_view.clear()
 
     def stop(self) -> None:
         self.stopped.set()
-        self.refresh.set()
 
     def run(self) -> None:
         hardware = read_hardware()
         self.hardware_ready.emit(hardware)
         interval = 10 if platform == "win32" else 2
-        while True:
-            self.refresh.clear()
-            if self.stopped.is_set():
-                break
-            include_temperatures = self.temperature_view.is_set()
-            temperatures, clocks = read_sensors(hardware, include_temperatures=include_temperatures)
-            self.sensors_ready.emit((temperatures if include_temperatures else None, clocks))
-            self.refresh.wait(interval)
+        while not self.stopped.is_set():
+            self.sensors_ready.emit(read_sensors(hardware))
+            self.stopped.wait(interval)
 
 
 class Sparkline(QtWidgets.QWidget):
-    def __init__(self, color: str, fixed_scale: bool) -> None:
+    def __init__(self, color: str, fixed_scale: bool, secondary_color: str | None = None) -> None:
         super().__init__()
-        self.color = QtGui.QColor(color)
+        self.colors = tuple(QtGui.QColor(color) for color in (color, secondary_color) if color)
         self.fixed_scale = fixed_scale
-        self.points: deque[tuple[float, float | None]] = deque(maxlen=60)
+        self.points: deque[tuple[float, tuple[float | None, ...]]] = deque(maxlen=61)
         self.setMinimumHeight(48)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
 
-    def append(self, timestamp: float, value: float | None) -> None:
-        self.points.append((timestamp, value))
+    def append(self, timestamp: float, *values: float | None) -> None:
+        self.points.append((timestamp, values))
         while self.points and self.points[0][0] < timestamp - 60:
             self.points.popleft()
-        self.update()
+        if self.isVisible():
+            self.update()
 
     def paintEvent(self, event) -> None:
         if not self.points:
             return
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        painter.setPen(QtGui.QPen(self.color, 2))
         peak = 100.0 if self.fixed_scale else max(
-            1.0, *(value or 0 for _, value in self.points)
+            (value for _, values in self.points for value in values if value is not None), default=1.0,
         )
+        peak = max(1.0, peak)
         newest = self.points[-1][0]
-        path = QtGui.QPainterPath()
-        connected = False
-        for timestamp, value in self.points:
-            if value is None:
-                connected = False
-                continue
-            point = QtCore.QPointF(
-                2 + (1 - (newest - timestamp) / 60) * (self.width() - 4),
-                2 + (1 - min(value / peak, 1.0)) * (self.height() - 4),
-            )
-            if connected:
-                path.lineTo(point)
-            else:
-                path.moveTo(point)
-                painter.drawPoint(point)
-            connected = True
-        painter.drawPath(path)
+        for index, color in enumerate(self.colors):
+            pen = QtGui.QPen(color, 2)
+            if index == 1:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            path = QtGui.QPainterPath()
+            connected = False
+            for timestamp, values in self.points:
+                value = values[index]
+                if value is None:
+                    connected = False
+                    continue
+                point = QtCore.QPointF(
+                    2 + (1 - (newest - timestamp) / 60) * (self.width() - 4),
+                    2 + (1 - min(value / peak, 1.0)) * (self.height() - 4),
+                )
+                if connected:
+                    path.lineTo(point)
+                else:
+                    path.moveTo(point)
+                    painter.drawPoint(point)
+                connected = True
+            painter.drawPath(path)
 
 
 class TableModel(QtCore.QAbstractTableModel):
@@ -354,6 +355,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.snapshot: Snapshot | None = None
         self.hardware = Hardware()
         self.latest_clocks: tuple[Clock, ...] | None = None
+        self.latest_gpus: tuple[Gpu, ...] = ()
+        self.temperature_history: dict[tuple[str, str, str], TemperatureStats] = {}
+        self.current_temperatures: set[tuple[str, str, str]] = set()
+        self.tray = None
         self.animation: QtCore.QPropertyAnimation | None = None
         self.closing = False
         shell = QtWidgets.QWidget()
@@ -383,10 +388,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hardware_tables: dict[int, DataTable] = {}
         self.hardware_notes: dict[int, QtWidgets.QLabel] = {}
         self.filters: dict[int, QtWidgets.QLineEdit] = {}
+        self.rate_charts: dict[int, Sparkline] = {}
         self.build_dashboard()
         for index in range(len(METRICS)):
             self.build_detail(index)
         self.build_hardware_page()
+        self.setup_tray()
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().showMessage("Sampling system metrics…")
         edge = Qt.Edge
@@ -461,6 +468,9 @@ class MainWindow(QtWidgets.QMainWindow):
         hardware = QtWidgets.QPushButton("Hardware →")
         hardware.clicked.connect(lambda: self.navigate(HARDWARE_PAGE))
         top.addWidget(hardware)
+        gpu = QtWidgets.QPushButton("GPU →")
+        gpu.clicked.connect(self.open_gpu)
+        top.addWidget(gpu)
         layout.addLayout(top)
         clock_panel = QtWidgets.QWidget()
         clock_panel.setObjectName("clockPanel")
@@ -492,16 +502,28 @@ class MainWindow(QtWidgets.QMainWindow):
             reading = label("—", "reading")
             note = label("Waiting for first sample", "muted")
             note.setWordWrap(True)
-            chart = Sparkline(COLORS[index], index < 2)
+            chart = Sparkline(COLORS[index], index < 2, RATE_ACCENTS[index - 2] if index >= 2 else None)
             for widget in (title, reading, chart, note):
                 widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                 content.addWidget(widget)
+            if index >= 2:
+                content.addLayout(self.rate_legend(index))
             self.readings.append(reading)
             self.notes.append(note)
             self.charts.append(chart)
             grid.addWidget(card, index // 2, index % 2)
         layout.addLayout(grid, 1)
         self.stack.addWidget(page)
+
+    def rate_legend(self, index: int) -> QtWidgets.QHBoxLayout:
+        legend = QtWidgets.QHBoxLayout()
+        for name, mark, color in zip(RATE_CHANNELS[index - 2], ("━", "┄"), (COLORS[index], RATE_ACCENTS[index - 2])):
+            item = label(f"{mark} {name}")
+            item.setStyleSheet(f"background: transparent; color: {color}")
+            item.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            legend.addWidget(item)
+        legend.addStretch()
+        return legend
 
     def build_detail(self, index: int) -> None:
         page = QtWidgets.QWidget()
@@ -519,6 +541,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detail_notes.append(note)
         layout.addWidget(reading)
         layout.addWidget(note)
+        if index >= 2:
+            chart = Sparkline(COLORS[index], False, RATE_ACCENTS[index - 2])
+            chart.points = self.charts[index].points
+            chart.setMaximumHeight(105)
+            self.rate_charts[index] = chart
+            layout.addWidget(chart)
+            layout.addLayout(self.rate_legend(index))
         if index in (1, 2):
             memory = index == 1
             layout.addWidget(label("Memory modules" if memory else "Physical drives", "metric"))
@@ -577,26 +606,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.inventory = DataTable(("Category", "Model", "Identifier", "Driver / specification"))
         self.hardware_tabs.addTab(self.inventory, "Devices")
         self.temperature_table = self.add_sensor_tab(
-            self.hardware_tabs, "Temperatures", "Temperature", "Readings depend on hardware and driver support.",
+            self.hardware_tabs, "Temperatures", ("Device", "Sensor", "Current", "Min", "Avg", "Max", "Source"),
+            "Session statistics from available sensors. Missing current readings are shown as a dash.",
         )
         self.clock_table = self.add_sensor_tab(
-            self.hardware_tabs, "Clocks", "Frequency",
+            self.hardware_tabs, "Clocks", ("Device", "Sensor", "Frequency", "Source"),
             "Live clocks depend on driver support. RAM rates are configured or rated specifications.",
         )
+        self.gpu_table = self.add_sensor_tab(
+            self.hardware_tabs, "GPU", ("GPU", "Adapter", "Load", "VRAM used / total", "Clock", "Temp.", "Power"),
+            "Available readings depend on the graphics driver.",
+        )
         self.stack.addWidget(page)
+
+    def open_gpu(self) -> None:
+        self.hardware_tabs.setCurrentWidget(self.gpu_table.parentWidget())
+        self.navigate(HARDWARE_PAGE)
 
     def open_clocks(self) -> None:
         self.hardware_tabs.setCurrentWidget(self.clock_table.parentWidget())
         self.navigate(HARDWARE_PAGE)
 
-    def add_sensor_tab(self, tabs: QtWidgets.QTabWidget, title: str, unit: str, description: str) -> DataTable:
+    def add_sensor_tab(self, tabs: QtWidgets.QTabWidget, title: str, headers: tuple[str, ...], description: str) -> DataTable:
         page = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(page)
         note = label(description, "muted")
         note.setWordWrap(True)
         layout.addWidget(note)
-        table = DataTable(("Device", "Sensor", unit, "Source"))
-        table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        table = DataTable(headers)
         layout.addWidget(table, 1)
         tabs.addTab(page, title)
         return table
@@ -677,7 +714,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @Slot(object)
     def update_sensors(self, readings) -> None:
-        temperatures, clocks = readings
+        temperatures, clocks, gpus = readings
+        self.latest_gpus = gpus
+        self.current_temperatures = set()
+        for reading in temperatures:
+            key = (reading.device, reading.sensor, reading.source)
+            if key in self.current_temperatures:
+                continue
+            self.current_temperatures.add(key)
+            stats = self.temperature_history.get(key)
+            if stats is None:
+                value = reading.celsius
+                self.temperature_history[key] = TemperatureStats(reading, value, value, value)
+            else:
+                stats.add(reading)
         self.latest_clocks = clocks
         cpu = [reading for reading in clocks if reading.category == "CPU"]
         graphics = [reading.mhz for reading in clocks
@@ -690,23 +740,34 @@ class MainWindow(QtWidgets.QMainWindow):
                 cpu_text += " (OS reported)"
         gpu_text = f"{max(graphics):.0f} MHz" if graphics else "unavailable"
         self.clock_summary.setText(f"CPU · {cpu_text}     GPU · {gpu_text}")
-        if temperatures is not None and self.sensor_view_is_open(self.temperature_table):
-            self.temperature_table.update_rows(
-                ((reading.device, reading.device.casefold()), (reading.sensor, reading.sensor.casefold()),
-                 (f"{reading.celsius:.1f} °C", reading.celsius), (reading.source, reading.source))
-                for reading in temperatures
-            )
-        if self.sensor_view_is_open(self.clock_table):
-            self.update_clock_table(clocks)
+        self.update_sensor_view()
 
     def sensor_view_is_open(self, table: DataTable) -> bool:
-        return (self.stack.currentIndex() == HARDWARE_PAGE
+        return (self.isVisible() and self.stack.currentIndex() == HARDWARE_PAGE
                 and self.hardware_tabs.currentWidget() is table.parentWidget())
 
     def update_sensor_view(self) -> None:
-        self.hardware_sampler.set_temperature_view(self.sensor_view_is_open(self.temperature_table))
-        if self.latest_clocks is not None and self.sensor_view_is_open(self.clock_table):
+        if self.sensor_view_is_open(self.temperature_table):
+            rows = []
+            for key, stats in self.temperature_history.items():
+                device, sensor, source = key
+                current = stats.latest.celsius if key in self.current_temperatures else None
+                rows.append((
+                    (device, device.casefold()), (sensor, sensor.casefold()),
+                    numeric_cell(current, "°C"), numeric_cell(stats.minimum, "°C"),
+                    numeric_cell(stats.average, "°C"), numeric_cell(stats.maximum, "°C"), (source, source),
+                ))
+            self.temperature_table.update_rows(rows)
+        elif self.latest_clocks is not None and self.sensor_view_is_open(self.clock_table):
             self.update_clock_table(self.latest_clocks)
+        elif self.sensor_view_is_open(self.gpu_table):
+            self.gpu_table.update_rows(
+                ((gpu.name, gpu.name.casefold()), (gpu.address or "—", gpu.address),
+                 numeric_cell(gpu.load, "%"), (f"{size(gpu.used)} / {size(gpu.total)}", gpu.used or 0),
+                 numeric_cell(gpu.clock, "MHz", 0), numeric_cell(gpu.temperature, "°C"),
+                 numeric_cell(gpu.power, "W"))
+                for gpu in self.latest_gpus
+            )
 
     def update_clock_table(self, clocks: tuple[Clock, ...]) -> None:
         clock_rows = [
@@ -749,7 +810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.snapshot = snapshot
         self.uptime_label.setText(uptime_text(snapshot.uptime_seconds))
         memory = snapshot.memory
-        read, _ = snapshot.disk
+        read, written = snapshot.disk
         received, sent = snapshot.network
         readings = (percent(snapshot.cpu), percent(memory.percent if memory else None),
                     size(read, True), size(received, True))
@@ -760,10 +821,16 @@ class MainWindow(QtWidgets.QMainWindow):
             f"Download · Upload {size(sent, True)}",
         )
         now = monotonic()
-        for index, value in enumerate((snapshot.cpu, memory.percent if memory else None, read, received)):
+        series = ((snapshot.cpu,), (memory.percent if memory else None,), (read, written), (received, sent))
+        for index, values in enumerate(series):
             self.readings[index].setText(readings[index])
             self.notes[index].setText(notes[index])
-            self.charts[index].append(now, value)
+            self.charts[index].append(now, *values)
+        for chart in self.rate_charts.values():
+            if chart.isVisible():
+                chart.update()
+        if self.tray is not None:
+            self.tray.setToolTip(f"Pulse\nCPU {readings[0]} · RAM {readings[1]}")
         if 0 < self.stack.currentIndex() < HARDWARE_PAGE:
             self.update_detail(self.stack.currentIndex() - 1)
 
@@ -810,6 +877,55 @@ class MainWindow(QtWidgets.QMainWindow):
         self.detail_notes[index].setText(note)
         self.tables[index].update_rows(rows)
 
+    def setup_tray(self) -> None:
+        if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon = QtGui.QPixmap(32, 32)
+        icon.fill(QtGui.QColor("#203d38"))
+        painter = QtGui.QPainter(icon)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtGui.QPen(QtGui.QColor("#a7f3d7"), 2))
+        path = QtGui.QPainterPath(QtCore.QPointF(4, 16))
+        path.lineTo(10, 16)
+        path.lineTo(14, 8)
+        path.lineTo(18, 24)
+        path.lineTo(22, 16)
+        path.lineTo(28, 16)
+        painter.drawPath(path)
+        painter.end()
+        self.tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(icon), self)
+        self.tray.setToolTip("Pulse")
+        menu = QtWidgets.QMenu(self)
+        menu.addAction("Show Pulse", self.restore_from_tray)
+        menu.addAction("Quit Pulse", self.close)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self.tray_activated)
+        button = self.title_bar.control("↓", "Hide to tray")
+        button.clicked.connect(self.hide_to_tray)
+        self.title_bar.layout().insertWidget(self.title_bar.layout().count() - 3, button)
+
+    def hide_to_tray(self) -> None:
+        if self.tray is not None and QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.show()
+            self.hide()
+            self.sampler.page = 0
+        else:
+            self.showMinimized()
+
+    def tray_activated(self, reason) -> None:
+        if reason in (QtWidgets.QSystemTrayIcon.ActivationReason.Trigger,
+                      QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.restore_from_tray()
+
+    def restore_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.sampler.page = self.stack.currentIndex()
+        self.update_sensor_view()
+        if self.tray is not None:
+            self.tray.hide()
+
     def closeEvent(self, event) -> None:
         if any(worker.isRunning() for worker in self.workers):
             event.ignore()
@@ -817,6 +933,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sampler.stopped.set()
             self.hardware_sampler.stop()
             return
+        if self.tray is not None:
+            self.tray.hide()
         super().closeEvent(event)
 
     @Slot()

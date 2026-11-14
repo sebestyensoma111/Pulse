@@ -9,6 +9,7 @@ from pathlib import Path
 import psutil
 
 from pulse.core.clocks import Clock, linux_clocks, mhz
+from pulse.core.gpu import Gpu, detected_gpus
 from pulse.core.hardware import Hardware, command, json_object, sys_text
 
 
@@ -81,26 +82,51 @@ def linux_temperatures(hardware: Hardware, root: Path = Path("/sys")) -> tuple[T
     return tuple(readings)
 
 
-def nvidia_readings() -> tuple[tuple[Temperature, ...], tuple[Clock, ...]]:
+@dataclass(slots=True)
+class TemperatureStats:
+    latest: Temperature
+    minimum: float
+    maximum: float
+    average: float
+    count: int = 1
+
+    def add(self, reading: Temperature) -> None:
+        self.latest = reading
+        value = reading.celsius
+        self.minimum = min(self.minimum, value)
+        self.maximum = max(self.maximum, value)
+        self.count += 1
+        self.average += (value - self.average) / self.count
+
+
+def nvidia_readings() -> tuple[tuple[Temperature, ...], tuple[Clock, ...], tuple[Gpu, ...]]:
     executable = shutil.which("nvidia-smi")
     if executable is None:
-        return (), ()
-    output = command(
-        executable, "--query-gpu=name,pci.bus_id,temperature.gpu,clocks.gr,clocks.sm,clocks.mem",
-        "--format=csv,noheader,nounits",
-    )
+        return (), (), ()
+    query = "name,pci.bus_id,temperature.gpu,clocks.gr,clocks.sm,clocks.mem"
+    fields = "--format=csv,noheader,nounits"
+    output = command(executable, f"--query-gpu={query},utilization.gpu,memory.used,memory.total,power.draw", fields)
+    if not output:
+        output = command(executable, f"--query-gpu={query}", fields)
     readings = []
     clocks = []
+    gpus = []
     for row in csv.reader(output.splitlines(), skipinitialspace=True):
-        if len(row) != 6:
+        if len(row) not in (6, 10):
             continue
-        model, address, temp, *frequencies = row
-        if (value := degrees(temp)) is not None:
+        model, address, temp, graphics, sm, vram = row[:6]
+        value = degrees(temp)
+        if value is not None:
             readings.append(Temperature(model, "GPU core", value, address))
-        for channel, frequency in zip(("Graphics", "SM", "VRAM"), frequencies):
-            if (value := mhz(frequency)) is not None:
-                clocks.append(Clock(model, channel, value, address, "GPU"))
-    return tuple(readings), tuple(clocks)
+        for channel, frequency in zip(("Graphics", "SM", "VRAM"), (graphics, sm, vram)):
+            if (frequency_mhz := mhz(frequency)) is not None:
+                clocks.append(Clock(model, channel, frequency_mhz, address, "GPU"))
+        load, used, total, power = row[6:] or ("", "", "", "")
+        gpus.append(Gpu(
+            model, address, mhz(load), mhz(used, 1 / 2**20), mhz(total, 1 / 2**20),
+            mhz(graphics), value, mhz(power),
+        ))
+    return tuple(readings), tuple(clocks), tuple(gpus)
 
 
 def windows_disk_temperatures() -> tuple[Temperature, ...]:
@@ -119,15 +145,12 @@ def windows_disk_temperatures() -> tuple[Temperature, ...]:
     )
 
 
-def read_sensors(
-    hardware: Hardware, *, include_temperatures: bool = True,
-) -> tuple[tuple[Temperature, ...], tuple[Clock, ...]]:
-    temperatures, clocks = nvidia_readings()
+def read_sensors(hardware: Hardware) -> tuple[tuple[Temperature, ...], tuple[Clock, ...], tuple[Gpu, ...]]:
+    temperatures, clocks, gpus = nvidia_readings()
     if sys.platform == "linux":
-        if include_temperatures:
-            temperatures = linux_temperatures(hardware) + temperatures
-        return temperatures, linux_clocks(hardware) + clocks
-    if sys.platform == "win32":
+        temperatures = linux_temperatures(hardware) + temperatures
+        clocks = linux_clocks(hardware) + clocks
+    elif sys.platform == "win32":
         try:
             frequency = psutil.cpu_freq()
         except (OSError, psutil.Error, NotImplementedError):
@@ -135,7 +158,5 @@ def read_sensors(
         if frequency and frequency.current > 0:
             clocks = (Clock(hardware.cpu_model or "CPU", "Reported CPU frequency", frequency.current,
                             "Windows · may be nominal"),) + clocks
-        if include_temperatures:
-            temperatures += windows_disk_temperatures()
-        return temperatures, clocks
-    return temperatures, clocks
+        temperatures += windows_disk_temperatures()
+    return temperatures, clocks, detected_gpus(hardware, gpus, clocks, temperatures)
