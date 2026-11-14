@@ -3,7 +3,7 @@
 
 [Magyar](README.hu.md) · English
 
-Pulse is a desktop system monitor for Windows and Linux. The dashboard shows CPU and RAM usage, disk activity, and network traffic, with charts covering the last minute.
+Pulse is a desktop system monitor for Windows and Linux. The dashboard shows system uptime, CPU and RAM usage, disk activity, and network traffic, with charts covering the last minute.
 
 ![Pulse dashboard](assets/screenshots/dashboard.png)
 

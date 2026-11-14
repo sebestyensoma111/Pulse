@@ -80,6 +80,16 @@ def percent(value: float | None) -> str:
     return "—" if value is None else f"{value:.1f}%"
 
 
+def uptime_text(seconds: int | None) -> str:
+    if seconds is None:
+        return "Uptime · —"
+    days, seconds = divmod(seconds, 86_400)
+    hours, seconds = divmod(seconds, 3_600)
+    minutes, seconds = divmod(seconds, 60)
+    duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"Uptime · {days}d {duration}" if days else f"Uptime · {duration}"
+
+
 def drive_capacity(value: int | None) -> str:
     if value is None:
         return "—"
@@ -459,6 +469,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clock_summary = label("Reading CPU and GPU clocks…", "clockSummary")
         self.clock_summary.setWordWrap(True)
         clock_bar.addWidget(self.clock_summary, 1)
+        self.uptime_label = label(uptime_text(None), "clockSummary")
+        clock_bar.addWidget(self.uptime_label)
         clocks = QtWidgets.QPushButton("Clocks →")
         clocks.clicked.connect(self.open_clocks)
         clock_bar.addWidget(clocks)
@@ -735,6 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.snapshot is None:
             self.statusBar().showMessage("Sampling every second · Charts cover the last 60 seconds")
         self.snapshot = snapshot
+        self.uptime_label.setText(uptime_text(snapshot.uptime_seconds))
         memory = snapshot.memory
         read, _ = snapshot.disk
         received, sent = snapshot.network

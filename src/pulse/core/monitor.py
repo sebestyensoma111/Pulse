@@ -1,5 +1,6 @@
 # made by Péter Noé
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from logging import getLogger
@@ -54,6 +55,7 @@ class Snapshot:
     volumes: tuple[Volume, ...] | None
     interfaces: tuple[Interface, ...] | None
     processes: tuple[Process, ...] | None
+    uptime_seconds: int | None = None
 
 
 class Rates:
@@ -125,7 +127,17 @@ class Monitor:
             read("volumes", self.volumes) if include_volumes else None,
             interfaces,
             read("processes", self.process_list) if include_processes else None,
+            read("system uptime", self.uptime),
         )
+
+    @staticmethod
+    def uptime() -> int:
+        if hasattr(time, "CLOCK_BOOTTIME"):
+            try:
+                return int(time.clock_gettime(time.CLOCK_BOOTTIME))
+            except OSError:
+                pass
+        return max(0, int(time.time() - psutil.boot_time()))
 
     @staticmethod
     def disk_counters() -> dict[str, tuple[int, int]]:
